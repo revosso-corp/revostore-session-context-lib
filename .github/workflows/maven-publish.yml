@@ -75,6 +75,14 @@ jobs:
           mvn -B -U -DskipTests deploy \
             -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/${{ github.repository }}
 
+      - name: Create and push Git tag
+        run: |
+          RELEASE="${{ steps.set_release.outputs.release }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v$RELEASE"
+          git push origin "v$RELEASE"
+
       - name: Bump to next SNAPSHOT version
         id: bump_snapshot
         run: |
