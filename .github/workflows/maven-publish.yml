@@ -1,0 +1,105 @@
+name: Publish Maven package
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Maven local repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2-
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Configure Maven settings.xml for GitHub Packages
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'EOF'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.GITHUB_TOKEN}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
+      - name: Get current version
+        id: get_version
+        run: |
+          CURRENT=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+
+      - name: Set release version (drop -SNAPSHOT)
+        id: set_release
+        run: |
+          VERSION="${{ steps.get_version.outputs.current }}"
+          RELEASE=${VERSION%-SNAPSHOT}   # remove -SNAPSHOT
+          echo "Release version: $RELEASE"
+          echo "release=$RELEASE" >> $GITHUB_OUTPUT
+
+          # Set Maven project to release version for deploy
+          mvn -B versions:set -DnewVersion=$RELEASE
+
+      - name: Build and deploy release version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mvn -B -U -DskipTests deploy \
+            -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/${{ github.repository }}
+
+      - name: Bump to next SNAPSHOT version
+        id: bump_snapshot
+        run: |
+          RELEASE="${{ steps.set_release.outputs.release }}"
+          echo "Current release version: $RELEASE"
+
+          if [[ "$RELEASE" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            NEXT_PATCH=$((PATCH + 1))
+            NEXT_SNAPSHOT="$MAJOR.$MINOR.$NEXT_PATCH-SNAPSHOT"
+          else
+            echo "⚠️ Could not parse version, defaulting to 0.0.1-SNAPSHOT"
+            NEXT_SNAPSHOT="0.0.1-SNAPSHOT"
+          fi
+
+          echo "Next snapshot: $NEXT_SNAPSHOT"
+          echo "snapshot=$NEXT_SNAPSHOT" >> $GITHUB_OUTPUT
+          mvn -B versions:set -DnewVersion=$NEXT_SNAPSHOT
+
+      - name: Commit next SNAPSHOT version
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pom.xml
+          git commit -m "chore: bump version to ${{ steps.bump_snapshot.outputs.snapshot }}" || echo "No changes to commit"
+          git push origin HEAD:main
